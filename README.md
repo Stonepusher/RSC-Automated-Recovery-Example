@@ -11,7 +11,7 @@ Table of Contents
 
 Introduction
 
-This project provides samples of code which automates various actions through a Rubrik Security Cloud instance API.
+This project is an example of what is possible with minimal effort in regards to the automation of Hyper-V / Azure Local + DB (MS SQL and Oracle) recoveries utilizing the Rubrik Security Cloud GraphQL API.
 
 Installation
 
