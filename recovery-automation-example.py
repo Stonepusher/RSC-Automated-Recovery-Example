@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import json
 import requests
 import sys
@@ -16,14 +17,14 @@ def load_config(file_path='config.json'):
     Loads a JSON configuration file.
     """
     if not os.path.exists(file_path):
-        sys.exit(f"ERROR: Configuration file '{file_path}' not found.")
+        sys.exit(f"❌ ERROR: Configuration file '{file_path}' not found.")
     try:
         with open(file_path) as f:
             return json.load(f)
     except json.JSONDecodeError:
-        sys.exit(f"ERROR: File '{file_path}' is not valid JSON.")
+        sys.exit(f"❌ ERROR: File '{file_path}' is not valid JSON.")
     except Exception as exc:
-        sys.exit(f"ERROR loading '{file_path}': {exc}")
+        sys.exit(f"❌ ERROR loading '{file_path}': {exc}")
 
 def get_auth_token(client_id, client_secret, base_url):
     """
@@ -35,10 +36,10 @@ def get_auth_token(client_id, client_secret, base_url):
         response.raise_for_status()
         token_data = response.json()
         if 'access_token' not in token_data:
-             sys.exit(f"Authentication error: 'access_token' not found in response. Response: {token_data}")
+             sys.exit(f"❌ Authentication error: 'access_token' not found in response. Response: {token_data}")
         return token_data['access_token']
     except requests.exceptions.Timeout:
-        sys.exit(f"ERROR: Authentication request timed out connecting to {url}")
+        sys.exit(f"❌ ERROR: Authentication request timed out connecting to {url}")
     except requests.HTTPError as exc:
         response_text = f"HTTP {exc.response.status_code}"
         try:
@@ -46,9 +47,9 @@ def get_auth_token(client_id, client_secret, base_url):
             response_text = json.dumps(response_json, indent=2)
         except json.JSONDecodeError:
             response_text = exc.response.text
-        sys.exit(f"ERROR: Authentication HTTP error: {exc}\nResponse body:\n{response_text}")
+        sys.exit(f"❌ ERROR: Authentication HTTP error: {exc}\nResponse body:\n{response_text}")
     except requests.exceptions.RequestException as exc:
-        sys.exit(f"ERROR: Authentication network error: {exc}")
+        sys.exit(f"❌ ERROR: Authentication network error: {exc}")
 
 def graphql_query(token, base_url, query, variables=None, debug=False):
     """
@@ -157,14 +158,14 @@ def initiate_vm_mount(token, base_url, vm_object, vm_inventory, rename_vms, debu
     Initiates a Live Mount for a Hyper-V VM and returns info needed for monitoring.
     """
     vm_name = vm_object['name']
-    print(f"\n>> Preparing mount for VM: '{vm_name}'...")
+    print(f"\n🔎 Preparing mount for VM: '{vm_name}'...")
     
     target_vm = next((vm for vm in vm_inventory if vm.get('name') == vm_name), None)
     if not target_vm: return False, f"VM '{vm_name}' not found in the Rubrik inventory.", None
     
     vm_id = target_vm.get('id')
     vm_cluster_id = target_vm.get('cluster', {}).get('id')
-    print(f"  OK: Found VM. ID: {vm_id}")
+    print(f"  ✅ Found VM. ID: {vm_id}")
 
     snapshot_fid = get_latest_snapshot_for_hyperv_vm(token, base_url, vm_id, debug_mode)
     
@@ -175,7 +176,7 @@ def initiate_vm_mount(token, base_url, vm_object, vm_inventory, rename_vms, debu
     host_id = selected_host.get('id')
     
     mount_vm_name = generate_mount_name(vm_name) if rename_vms else vm_name
-    print(f"  -> Will be mounted as '{mount_vm_name}' on host '{selected_host.get('name')}'.")
+    print(f"  ⚙️  Will be mounted as '{mount_vm_name}' on host '{selected_host.get('name')}'.")
 
     mutation=''' mutation CreateHypervMount($input: CreateHypervVirtualMachineSnapshotMountInput!) { createHypervVirtualMachineSnapshotMount(input: $input) { id } }'''
     variables = {"input": {"id": snapshot_fid, "config": { "hostId": host_id, "vmName": mount_vm_name, "powerOn": True, "removeNetworkDevices": True }}}
@@ -184,7 +185,7 @@ def initiate_vm_mount(token, base_url, vm_object, vm_inventory, rename_vms, debu
     if not result or not result.get('id'): return False, f"Mount initiation failed for '{vm_name}'. API Response: {result}", None
 
     job_info = { "type": "VM", "name": vm_name, "mount_name": mount_vm_name, "status": "INITIATED" }
-    return True, f"  -> Mount initiation for '{vm_name}' started.", job_info
+    return True, f"  🚀 Mount initiation for '{vm_name}' started.", job_info
 
 def initiate_oracle_live_mount(token, base_url, db_object, db_inventory, rename_oracle_dbs, debug_mode):
     """
@@ -196,13 +197,13 @@ def initiate_oracle_live_mount(token, base_url, db_object, db_inventory, rename_
 
     if not recovery_target_hostname: return False, f"Recovery plan for DB '{db_name}' is missing the 'recovery_target_hostname' field.", None
     
-    print(f"\n>> Preparing mount for Oracle DB: '{db_name}'...")
+    print(f"\n🔎 Preparing mount for Oracle DB: '{db_name}'...")
     target_db = next((db for db in db_inventory if db.get('name') == db_name), None)
     if not target_db: return False, f"Oracle DB '{db_name}' not found in the Rubrik inventory.", None
 
     db_id = target_db.get('id')
     db_cluster_id = target_db.get('cluster', {}).get('id')
-    print(f"  OK: Found DB. ID: {db_id}")
+    print(f"  ✅ Found DB. ID: {db_id}")
 
     snapshot = get_latest_oracle_snapshot(token, base_url, db_id, debug_mode)
     snapshot_id = snapshot.get('id')
@@ -212,14 +213,14 @@ def initiate_oracle_live_mount(token, base_url, db_object, db_inventory, rename_
     if not target_host: return False, f"Designated recovery host '{recovery_target_hostname}' was not found or is not available.", None
     
     host_id = target_host.get('id')
-    print(f"  -> Will be mounted on designated host '{recovery_target_hostname}'.")
+    print(f"  ⚙️  Will be mounted on designated host '{recovery_target_hostname}'.")
     
     config = { "targetOracleHostOrRacId": host_id, "shouldMountFilesOnly": False, "recoveryPoint": { "snapshotId": snapshot_id }, "shouldSkipDropDbInUndo": False }
     mount_db_name = db_name
 
     if rename_oracle_dbs:
         mount_db_name = generate_oracle_mount_name(db_name)
-        print(f"  -> Generated new DB name for mount: '{mount_db_name}'")
+        print(f"  ⚙️  Generated new DB name for mount: '{mount_db_name}'")
         config['mountedDatabaseName'] = mount_db_name
         config['shouldAllowRenameToSource'] = False
     else:
@@ -242,7 +243,7 @@ def initiate_oracle_live_mount(token, base_url, db_object, db_inventory, rename_
     if not job_id: return False, f"Oracle Live Mount initiation for '{db_name}' failed. API Response: {result}", None
         
     job_info = { "type": "ORACLE_DB", "name": db_name, "mount_name": mount_db_name, "status": "INITIATED" }
-    return True, f"  -> Mount initiation for '{db_name}' started.", job_info
+    return True, f"  🚀 Mount initiation for '{db_name}' started.", job_info
 
 def initiate_mssql_live_mount(token, base_url, db_object_from_config, rename_sql_dbs, debug_mode):
     """
@@ -254,16 +255,16 @@ def initiate_mssql_live_mount(token, base_url, db_object_from_config, rename_sql
 
     if not recovery_target_fqdn: return False, f"Recovery plan for DB '{db_name}' is missing 'recovery_target_hostname'.", None
 
-    print(f"\n>> Preparing mount for SQL DB: '{db_name}' on '{source_location}'...")
+    print(f"\n🔎 Preparing mount for SQL DB: '{db_name}' on '{source_location}'...")
 
     target_db = find_mssql_db_by_location(token, base_url, db_name, source_location, debug_mode)
     if not target_db: return False, f"SQL DB '{db_name}' at location '{source_location}' not found.", None
     
     db_id = target_db.get('id')
-    print(f"  OK: Found DB. ID: {db_id}")
+    print(f"  ✅ Found DB. ID: {db_id}")
 
     recovery_point_date = get_latest_snapshot_for_mssql_db(token, base_url, db_id, debug_mode)
-    print(f"  OK: Found latest recovery point: {recovery_point_date}")
+    print(f"  ✅ Found latest recovery point: {recovery_point_date}")
 
     compatible_instances = get_compatible_mssql_instances(token, base_url, db_id, recovery_point_date, debug_mode)
     
@@ -280,12 +281,12 @@ def initiate_mssql_live_mount(token, base_url, db_object_from_config, rename_sql
     if not target_instance: return False, f"Designated recovery instance '{recovery_target_fqdn}' is not a compatible target for this database and snapshot.", None
     
     target_instance_id = target_instance.get('id')
-    print(f"  OK: Designated recovery instance is compatible.")
+    print(f"  ✅ Designated recovery instance is compatible.")
     
     mount_db_name = db_name
     if rename_sql_dbs:
         mount_db_name = generate_mount_name(db_name)
-    print(f"  -> Will be mounted as '{mount_db_name}'.")
+    print(f"  ⚙️  Will be mounted as '{mount_db_name}'.")
 
     config = {
         "recoveryPoint": {"date": recovery_point_date},
@@ -307,7 +308,7 @@ def initiate_mssql_live_mount(token, base_url, db_object_from_config, rename_sql
     if not job_id: return False, f"SQL Live Mount initiation for '{db_name}' failed. API Response: {result}", None
         
     job_info = { "type": "SQL_DB", "name": db_name, "mount_name": mount_db_name, "job_id": job_id, "status": "INITIATED" }
-    return True, f"  -> Mount initiation for '{db_name}' started.", job_info
+    return True, f"  🚀 Mount initiation for '{db_name}' started.", job_info
 
 
 #
@@ -329,7 +330,7 @@ def get_latest_snapshot_for_hyperv_vm(token, base_url, vm_id, debug_mode):
     except (ValueError, TypeError): raise Exception(f"Could not determine latest snapshot date for VM ID {vm_id}.")
     snapshot_fid = latest_snap.get('id')
     if not snapshot_fid: raise Exception(f"Latest valid snapshot for VM ID {vm_id} is missing its 'id'.")
-    print(f"  OK: Found latest valid snapshot FID: {snapshot_fid}")
+    print(f"  ✅ Found latest valid snapshot FID: {snapshot_fid}")
     return snapshot_fid
 
 def get_connected_hyperv_servers_for_cluster(token, base_url, cluster_id, debug_mode):
@@ -479,13 +480,13 @@ def check_mssql_mount_status(token, base_url, mount_name, debug_mode):
 
 def find_hyperv_mount_id(token, base_url, mount_name, debug_mode):
     """
-    Finds the functional ID (fid) of a Hyper-V mount by its name.
+    Finds the ID of a Hyper-V mount by its name.
     """
     query = """ 
         query FindSpecificHyperVMount($filters: [HypervLiveMountFilterInput!]) { 
             hypervMounts(first: 1, filters: $filters) { 
                 nodes { 
-                    fid 
+                    id 
                 } 
             } 
         }
@@ -495,15 +496,15 @@ def find_hyperv_mount_id(token, base_url, mount_name, debug_mode):
     nodes = data.get('hypervMounts', {}).get('nodes', [])
     
     if not nodes: 
-        print(f"\n  WARNING: No Hyper-V mount found named '{mount_name}'.")
+        print(f"\n  ⚠️  Warning: No Hyper-V mount found named '{mount_name}'.")
         return None
     
-    mount_fid = nodes[0].get('fid')
-    if not mount_fid:
-        print(f"\n  WARNING: Found Hyper-V mount '{mount_name}' but it is missing the required 'fid' for unmounting.")
+    mount_id = nodes[0].get('id')
+    if not mount_id:
+        print(f"\n  ⚠️  Warning: Found Hyper-V mount '{mount_name}' but it is missing the required 'id' for unmounting.")
         return None
         
-    return mount_fid
+    return mount_id
 
 def find_oracle_mount_id(token, base_url, mount_name, debug_mode):
     query = """ query FindOracleMount($filters: [OracleLiveMountFilterInput!]) { oracleLiveMounts(first: 1, filters: $filters) { nodes { id } } } """
@@ -514,6 +515,9 @@ def find_oracle_mount_id(token, base_url, mount_name, debug_mode):
     return None
 
 def find_mssql_mount_id(token, base_url, mount_name, debug_mode):
+    """
+    Finds the functional ID (fid) of a SQL mount by its name.
+    """
     query = """ 
         query MssqlDatabaseLiveMountsQuery($filters: [MssqlDatabaseLiveMountFilterInput!]) {
             mssqlDatabaseLiveMounts(filters: $filters, first: 1) {
@@ -526,11 +530,12 @@ def find_mssql_mount_id(token, base_url, mount_name, debug_mode):
     variables = {"filters": [{"field": "MOUNTED_DATABASE_NAME", "texts": [mount_name]}]}
     data = graphql_query(token, base_url, query, variables, debug=debug_mode)
     nodes = data.get('mssqlDatabaseLiveMounts', {}).get('nodes', [])
-    if nodes: return nodes[0].get('fid')
+    if nodes:
+        return nodes[0].get('fid')
     return None
 
 def unmount_vm(token, base_url, mount_id, mount_name, debug_mode):
-    print(f"\n  -> Attempting to unmount VM: '{mount_name}' (ID: {mount_id})...")
+    print(f"\n  🗑️  Attempting to unmount VM: '{mount_name}' (ID: {mount_id})...")
     mutation = """ mutation HyperVLiveMountUnmountMutation($input: DeleteHypervVirtualMachineSnapshotMountInput!) { deleteHypervVirtualMachineSnapshotMount(input: $input) { error { message } } } """
     variables = {"input": {"id": mount_id, "force": True}}
     max_retries = 3
@@ -539,38 +544,38 @@ def unmount_vm(token, base_url, mount_id, mount_name, debug_mode):
             data = graphql_query(token, base_url, mutation, variables, debug=debug_mode)
             result = data.get('deleteHypervVirtualMachineSnapshotMount')
             if result and result.get('error') is None:
-                print(" OK: Unmount task initiated.")
+                print(" ✅ Success: Unmount task initiated.")
                 return True
             else:
                 error_msg = result.get('error', {}).get('message', 'Unknown error during unmount.')
                 print(f"  Attempt {attempt + 1}: Failed to initiate unmount. Reason: {error_msg}")
         except Exception as e: print(f"  Attempt {attempt + 1}: Error during unmount API call: {e}")
         if attempt < max_retries - 1: time.sleep(10)
-        else: print(f"  ERROR: All {max_retries} unmount attempts failed for {mount_name}.")
+        else: print(f"  ❌ All {max_retries} unmount attempts failed for {mount_name}.")
     return False
 
 def unmount_oracle_db(token, base_url, mount_id, mount_name, debug_mode):
-    print(f"  -> Attempting to unmount Oracle DB: '{mount_name}' (ID: {mount_id})...", end="")
+    print(f"  🗑️  Attempting to unmount Oracle DB: '{mount_name}' (ID: {mount_id})...", end="")
     mutation = """ mutation OracleLiveMountUnmountMutation($input: DeleteOracleMountInput!) { deleteOracleMount(input: $input) { id } } """
     variables = {"input": {"id": mount_id, "force": True}}
     try:
         graphql_query(token, base_url, mutation, variables, debug=debug_mode)
-        print(" OK: Unmount task initiated.")
+        print(" ✅ Success: Unmount task initiated.")
         return True
     except Exception as e:
-        print(f" Failure: {e}")
+        print(f" ❌ Failure: {e}")
         return False
 
 def unmount_mssql_db(token, base_url, mount_id, mount_name, debug_mode):
-    print(f"  -> Attempting to unmount SQL DB: '{mount_name}' (ID: {mount_id})...", end="")
+    print(f"  🗑️  Attempting to unmount SQL DB: '{mount_name}' (ID: {mount_id})...", end="")
     mutation = """ mutation MssqlLiveMountUnmountMutation($input: DeleteMssqlLiveMountInput!) { deleteMssqlLiveMount(input: $input) { id } } """
     variables = {"input": {"id": mount_id, "force": True}}
     try:
         graphql_query(token, base_url, mutation, variables, debug=debug_mode)
-        print(" OK: Unmount task initiated.")
+        print(" ✅ Success: Unmount task initiated.")
         return True
     except Exception as e:
-        print(f" Failure: {e}")
+        print(f" ❌ Failure: {e}")
         return False
 
 #
@@ -586,13 +591,13 @@ def main():
     print("--- Rubrik Recovery Automation Script ---")
     
     api_creds = load_config('config.json')
-    print(">> Authenticating with Rubrik cluster...")
+    print("🔐 Authenticating with Rubrik cluster...")
     token = get_auth_token(api_creds['RUBRIK_CLIENT_ID'], api_creds['RUBRIK_CLIENT_SECRET'], api_creds['RUBRIK_BASE_URL'])
-    print("   OK: Authentication successful.\n")
+    print("   ✅ Authentication successful.\n")
 
     recovery_plan_filename = 'recovery-template.json'
     if not os.path.exists(recovery_plan_filename):
-        print(f">> Notice: '{recovery_plan_filename}' not found.")
+        print(f"📄 Notice: '{recovery_plan_filename}' not found.")
         sample_config = {
           "recovery_plan_name": "Sample Auto-Generated Recovery Plan",
           "settings": {
@@ -616,15 +621,15 @@ def main():
         try:
             with open(recovery_plan_filename, 'w') as f:
                 json.dump(sample_config, f, indent=2)
-            print(f"   OK: A sample '{recovery_plan_filename}' has been created.")
+            print(f"   ✅ A sample '{recovery_plan_filename}' has been created.")
             print(f"   Please edit it with your actual object names and run the script again.\n")
             sys.exit(0)
         except Exception as e:
-            sys.exit(f"ERROR: Could not create sample config file: {e}")
+            sys.exit(f"❌ Could not create sample config file: {e}")
             
     recovery_plan = load_config(recovery_plan_filename)
     plan_name = recovery_plan.get('recovery_plan_name', 'Unnamed Plan')
-    print(f">> Loaded Recovery Plan: '{plan_name}'\n")
+    print(f"📖 Loaded Recovery Plan: '{plan_name}'\n")
 
     # Load settings from the recovery plan, with defaults.
     plan_settings = recovery_plan.get('settings', {})
@@ -634,14 +639,14 @@ def main():
     rename_oracle_dbs = plan_settings.get('rename_oracle_dbs', False)
 
     try:
-        print(">> Caching protected object inventories from Rubrik...")
+        print("🚚 Caching protected object inventories from Rubrik...")
         vm_inventory = get_protected_hyperv_vms(token, api_creds['RUBRIK_BASE_URL'], debug_mode)
         print(f"   - Found {len(vm_inventory)} protected Hyper-V VMs.")
         oracle_db_inventory = get_protected_oracle_dbs(token, api_creds['RUBRIK_BASE_URL'], debug_mode)
         print(f"   - Found {len(oracle_db_inventory)} protected Oracle DBs.")
-        print("   OK: Inventories cached successfully.\n")
+        print("   ✅ Inventories cached successfully.\n")
     except Exception as e:
-        sys.exit(f"ERROR: Critical error during inventory caching: {e}")
+        sys.exit(f"❌ Critical error during inventory caching: {e}")
         
     oracle_db_names = {db['name'] for db in oracle_db_inventory}
     
@@ -651,10 +656,10 @@ def main():
     for i, phase in enumerate(phases):
         phase_num = phase.get('phase_number')
         phase_desc = phase.get('description', 'No description')
-        print(f"--- Starting Phase {phase_num}: {phase_desc} ---")
+        print(f"--- ▶️  Starting Phase {phase_num}: {phase_desc} ---")
 
         initiated_jobs = []
-        print("  -> Initiating all recovery jobs for this phase...")
+        print("  🚀 Initiating all recovery jobs for this phase...")
         for recovery_object in phase.get('objects_to_recover', []):
             obj_type = recovery_object.get('type')
             obj_name = recovery_object.get('name')
@@ -662,7 +667,7 @@ def main():
 
             try:
                 if "SAMPLE_" in obj_name.upper():
-                    print(f"   WARNING: Skipping sample object '{obj_name}'. Please update your '{recovery_plan_filename}'.")
+                    print(f"   ⚠️ Skipping sample object '{obj_name}'. Please update your '{recovery_plan_filename}'.")
                     continue
                 
                 if obj_type == "VM":
@@ -673,11 +678,11 @@ def main():
                     else:
                         success, message, job_info = initiate_mssql_live_mount(token, api_creds['RUBRIK_BASE_URL'], recovery_object, rename_sql_dbs, debug_mode)
                 else:
-                    print(f"   WARNING: Skipping object '{obj_name}' with unknown type '{obj_type}'.")
+                    print(f"   ⚠️ Skipping object '{obj_name}' with unknown type '{obj_type}'.")
                     continue
                 
                 if not success:
-                    print(f"\nCRITICAL ERROR during initiation for '{obj_name}'.")
+                    print(f"\n❌ CRITICAL ERROR during initiation for '{obj_name}'.")
                     print(f"   Reason: {message}")
                     sys.exit(1)
                 else:
@@ -685,12 +690,12 @@ def main():
                     initiated_jobs.append(job_info)
 
             except Exception as e:
-                print(f"\nCRITICAL SCRIPT ERROR in Phase {phase_num} while processing '{obj_name}'.")
+                print(f"\n❌ CRITICAL SCRIPT ERROR in Phase {phase_num} while processing '{obj_name}'.")
                 print(f"   Error details: {e}")
                 sys.exit(1)
         
         if initiated_jobs:
-            print(f"\n  .. Monitoring {len(initiated_jobs)} in-progress jobs for Phase {phase_num}...")
+            print(f"\n  ⌛ Monitoring {len(initiated_jobs)} in-progress jobs for Phase {phase_num}...")
             max_polls = 60
             is_first_poll = True
             completed_messages = []
@@ -700,7 +705,7 @@ def main():
                     # Move cursor up to overwrite previous status block
                     print(f"\x1b[A" * (len(initiated_jobs) + len(completed_messages) + 1), end="")
                 
-                print(f"--- Monitoring Phase {phase_num} (Updated: {time.strftime('%H:%M:%S')}) ---")
+                print(f"--- ⌛ Monitoring Phase {phase_num} (Updated: {time.strftime('%H:%M:%S')}) ---")
                 for msg in completed_messages:
                     print(msg)
                 is_first_poll = False
@@ -722,7 +727,7 @@ def main():
                         if (job['type'] == 'VM' and status == 'POWEREDON') or \
                            (job['type'] in ['ORACLE_DB', 'SQL_DB'] and status == 'AVAILABLE'):
                             
-                            success_message = f"  - {job['name']:<20} ({job['type']}): OK: SUCCESS         "
+                            success_message = f"  - {job['name']:<20} ({job['type']}): ✅ SUCCESS         "
                             completed_messages.append(success_message)
                             
                             mount_id = None
@@ -732,16 +737,16 @@ def main():
                             elif job['type'] == 'SQL_DB': mount_id = find_mssql_mount_id(token, api_creds['RUBRIK_BASE_URL'], mount_name_for_cleanup, debug_mode)
                             
                             if mount_id: mounted_objects.append({'type': job['type'], 'id': mount_id, 'name': mount_name_for_cleanup})
-                            else: print(f"    -> WARNING: Could not find mount ID for '{job['name']}' for cleanup.")
+                            else: print(f"    └─ ⚠️ Warning: Could not find mount ID for '{job['name']}' for cleanup.")
                             
                             initiated_jobs.remove(job)
 
                         elif status in ['FAILED', 'FAILURE', 'MOUNT_FAILED']:
-                            print(f"\nCRITICAL ERROR: Job for '{job['name']}' failed with status {status}.")
+                            print(f"\n❌ CRITICAL ERROR: Job for '{job['name']}' failed with status {status}.")
                             sys.exit(1)
 
                     except Exception as e:
-                        print(f"\nCRITICAL SCRIPT ERROR while monitoring '{job['name']}'.")
+                        print(f"\n❌ CRITICAL SCRIPT ERROR while monitoring '{job['name']}'.")
                         print(f"   Error details: {e}")
                         sys.exit(1)
                 
@@ -752,33 +757,33 @@ def main():
                 time.sleep(10)
             
             if initiated_jobs:
-                print(f"\nCRITICAL ERROR: Phase {phase_num} timed out.")
+                print(f"\n❌ CRITICAL ERROR: Phase {phase_num} timed out.")
                 for job in initiated_jobs: print(f"  - {job['name']} did not complete.")
                 sys.exit(1)
 
-        print(f"--- OK: Phase {phase_num} Completed Successfully ---")
+        print(f"--- ✅ Phase {phase_num} Completed Successfully ---")
 
         if i < len(phases) - 1:
             wait_time = phase.get('wait_after_previous_seconds', 0)
             if wait_time > 0:
-                print(f"\n.. Waiting for {wait_time} seconds before starting the next phase...")
+                print(f"\n⏳ Waiting for {wait_time} seconds before starting the next phase...")
                 time.sleep(wait_time)
-                print("   OK: Wait complete.\n")
+                print("   ✅ Wait complete.\n")
 
-    print("\n\n*** All recovery phases completed successfully! ***")
+    print("\n\n🎉🎉🎉 All recovery phases completed successfully! 🎉🎉🎉")
     
     script_end_time = time.time()
     duration_seconds = script_end_time - script_start_time
     minutes, seconds = divmod(duration_seconds, 60)
-    print(f"\n>> Total recovery runtime: {int(minutes)} minutes and {seconds:.2f} seconds.")
+    print(f"\n📊 Total recovery runtime: {int(minutes)} minutes and {seconds:.2f} seconds.")
     
     if mounted_objects:
-        print("\n--- Starting Cleanup Phase: Unmounting all live mounts ---")
+        print("\n--- 🧹 Starting Cleanup Phase: Unmounting all live mounts ---")
         for mount in mounted_objects:
             if mount['type'] == 'VM': unmount_vm(token, api_creds['RUBRIK_BASE_URL'], mount['id'], mount['name'], debug_mode)
             elif mount['type'] == 'ORACLE_DB': unmount_oracle_db(token, api_creds['RUBRIK_BASE_URL'], mount['id'], mount['name'], debug_mode)
             elif mount['type'] == 'SQL_DB': unmount_mssql_db(token, api_creds['RUBRIK_BASE_URL'], mount['id'], mount['name'], debug_mode)
-        print("--- OK: Cleanup Phase Complete ---")
+        print("--- ✅ Cleanup Phase Complete ---")
     
     sys.exit(0)
 
