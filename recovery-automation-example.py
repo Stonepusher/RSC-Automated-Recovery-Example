@@ -2,7 +2,7 @@
 """
 Rubrik Recovery Orchestrator
 
-This script automates the process of mounting Hyper-V VMs, Oracle Databases,
+This script automates the process of mounting Azure Local VMs, Oracle Databases,
 and Microsoft SQL Server databases from Rubrik backups based on a defined
 recovery plan. It features phased execution, status monitoring, and automated
 cleanup.
@@ -31,7 +31,9 @@ def setup_logging(debug_mode=False):
     Configures logging for the script.
 
     Logs are printed to the console. The level is set to DEBUG if debug_mode is
-    True, otherwise it's set to INFO.
+    True, otherwise it's set to INFO. The script does not log to a file by
+    default, but can be configured to do so by adding the 'filename' parameter
+    to basicConfig.
     """
     log_level = logging.DEBUG if debug_mode else logging.INFO
     logging.basicConfig(
@@ -64,11 +66,15 @@ def load_json_file(file_path):
         ConfigError: If the file is not found, is not valid JSON, or cannot be read.
     """
     logging.info(f"Loading configuration from '{file_path}'...")
+    print(f"🔄 [STATUS] Loading configuration from '{file_path}'...")
     if not os.path.exists(file_path):
         raise ConfigError(f"Configuration file '{file_path}' not found.")
     try:
         with open(file_path, 'r') as f:
-            return json.load(f)
+            data = json.load(f)
+            logging.info(f"Successfully loaded and validated '{file_path}'.")
+            print(f"✅ [SUCCESS] Successfully loaded and validated '{file_path}'.\n")
+            return data
     except json.JSONDecodeError as e:
         raise ConfigError(f"File '{file_path}' is not a valid JSON file. Error: {e}")
     except Exception as e:
@@ -79,6 +85,7 @@ def get_auth_token(client_id, client_secret, base_url):
     Authenticates with the Rubrik cluster and retrieves an API token.
     """
     logging.info("Requesting API authentication token...")
+    print("🔐 [STATUS] Authenticating with Rubrik cluster...")
     api_url = f"{base_url}/api/client_token"
     payload = {"client_id": client_id, "client_secret": client_secret}
     try:
@@ -89,6 +96,7 @@ def get_auth_token(client_id, client_secret, base_url):
         if not access_token:
             raise ConfigError("Authentication failed: 'access_token' not found in response.")
         logging.info("Successfully authenticated with Rubrik cluster.")
+        print("✅ [SUCCESS] Authentication successful.\n")
         return access_token
     except requests.exceptions.RequestException as e:
         raise ConfigError(f"Authentication network error connecting to {api_url}: {e}")
@@ -101,7 +109,7 @@ class GqlError(Exception):
     """Custom exception for GraphQL API errors."""
     pass
 
-def execute_graphql_query(token, base_url, query, variables=None):
+def execute_graphql_query(token, base_url, query, variables=None, debug=False):
     """
     Executes a GraphQL query against the Rubrik API.
 
@@ -110,6 +118,7 @@ def execute_graphql_query(token, base_url, query, variables=None):
         base_url (str): The base URL of the Rubrik cluster.
         query (str): The GraphQL query string.
         variables (dict, optional): Variables for the GraphQL query.
+        debug (bool): If True, prints verbose query and response details.
 
     Returns:
         dict: The "data" portion of the API response.
@@ -121,12 +130,28 @@ def execute_graphql_query(token, base_url, query, variables=None):
     headers = {"Authorization": f"Bearer {token}"}
     payload = {"query": query, "variables": variables or {}}
 
-    logging.debug(f"Executing GraphQL query at {api_url}.")
-    logging.debug(f"Query: {query.strip()}")
-    logging.debug(f"Variables: {json.dumps(variables, indent=2)}")
+    if debug:
+        print("\n" + "="*20 + " GraphQL Query " + "="*20)
+        print(f"URL: {api_url}")
+        print("--- Query ---")
+        print(query)
+        print("--- Variables ---")
+        print(json.dumps(variables, indent=2))
+        print("="*55 + "\n")
 
     try:
         response = requests.post(api_url, json=payload, headers=headers, timeout=180, verify=False)
+        
+        if debug:
+            print("\n" + "="*20 + " GraphQL Response " + "="*20)
+            print(f"Status Code: {response.status_code}")
+            print("--- Full Response Body ---")
+            try:
+                print(json.dumps(response.json(), indent=2))
+            except json.JSONDecodeError:
+                print(response.text)
+            print("="*60 + "\n")
+
         response.raise_for_status()
         result = response.json()
 
@@ -146,7 +171,7 @@ def execute_graphql_query(token, base_url, query, variables=None):
     except requests.exceptions.RequestException as e:
         raise GqlError(f"Network error during GraphQL request: {e}")
 
-def get_all_paginated_nodes(token, base_url, query, variables, connection_path):
+def get_all_paginated_nodes(token, base_url, query, variables, connection_path, debug_mode):
     """
     Handles paginated GraphQL queries to fetch all nodes from a connection.
     """
@@ -156,7 +181,7 @@ def get_all_paginated_nodes(token, base_url, query, variables, connection_path):
     current_vars['after'] = None
 
     while True:
-        data = execute_graphql_query(token, base_url, query, current_vars)
+        data = execute_graphql_query(token, base_url, query, current_vars, debug=debug_mode)
         connection = data
         for key in connection_path.split('.'):
             connection = connection.get(key, {})
@@ -197,7 +222,7 @@ def generate_oracle_mount_name(base_name):
 
 class RecoveryObject:
     """Base class for a recoverable object."""
-    def __init__(self, token, base_url, config_obj):
+    def __init__(self, token, base_url, config_obj, debug_mode=False):
         self.token = token
         self.base_url = base_url
         self.config = config_obj
@@ -205,6 +230,7 @@ class RecoveryObject:
         self.mount_name = None
         self.mount_id = None
         self.status = "PENDING"
+        self.debug = debug_mode
 
     def initiate_mount(self, inventory, settings):
         raise NotImplementedError
@@ -212,9 +238,6 @@ class RecoveryObject:
     def check_status(self):
         raise NotImplementedError
 
-    def find_mount_id(self):
-        raise NotImplementedError
-    
     def unmount(self):
         raise NotImplementedError
 
@@ -228,29 +251,29 @@ class RecoveryObject:
                 }
             }
         """
-        all_snaps = get_all_paginated_nodes(self.token, self.base_url, query, {"workloadId": workload_id}, 'snapshotOfASnappableConnection')
+        all_snaps = get_all_paginated_nodes(self.token, self.base_url, query, {"workloadId": workload_id}, 'snapshotOfASnappableConnection', self.debug)
         valid_snaps = [s for s in all_snaps if s.get('id') and not s.get('isExpired') and not s.get('isQuarantined')]
         if not valid_snaps:
             raise GqlError(f"No valid snapshots found for workload ID: {workload_id}.")
         latest_snap = max(valid_snaps, key=lambda s: datetime.strptime(s['date'], '%Y-%m-%dT%H:%M:%S.%fZ'))
         return latest_snap
 
-class HyperVRecovery(RecoveryObject):
-    """Handles Hyper-V VM recovery."""
+class AzureLocalRecovery(RecoveryObject):
+    """Handles Azure Local VM recovery."""
     
-    TYPE = "HYPERV_VM"
+    TYPE = "AZURE_LOCAL_VM"
 
     def initiate_mount(self, inventory, settings):
-        logging.info(f"Preparing mount for VM: '{self.name}'")
+        logging.info(f"Preparing mount for Azure Local VM: '{self.name}'")
         target_vm = next((vm for vm in inventory if vm.get('name') == self.name), None)
         if not target_vm:
-            raise ValueError(f"VM '{self.name}' not found in Rubrik inventory.")
+            raise ValueError(f"Azure Local VM '{self.name}' not found in Rubrik inventory.")
 
         vm_id = target_vm['id']
         cluster_id = target_vm['cluster']['id']
 
         snapshot = self._get_latest_valid_snapshot(vm_id)
-        snapshot_fid = snapshot['id']
+        snapshot_id = snapshot['id']
         logging.info(f"  Using latest snapshot from: {snapshot['date']}")
 
         available_hosts = self._get_connected_hosts(cluster_id)
@@ -260,7 +283,11 @@ class HyperVRecovery(RecoveryObject):
         selected_host = random.choice(available_hosts)
         host_id = selected_host['id']
         
-        self.mount_name = generate_mount_name(self.name) if settings.get('rename_vms') else self.name
+        self.mount_name = self.name
+        if settings.get('rename_vms'):
+            self.mount_name = generate_mount_name(self.name)
+            print(f"    🏷️  [RENAME] Azure Local VM '{self.name}' will be mounted as '{self.mount_name}'.")
+        
         logging.info(f"  Will be mounted as '{self.mount_name}' on host '{selected_host['name']}'.")
 
         mutation = """
@@ -268,8 +295,8 @@ class HyperVRecovery(RecoveryObject):
                 createHypervVirtualMachineSnapshotMount(input: $input) { id }
             }
         """
-        variables = {"input": {"id": snapshot_fid, "config": { "hostId": host_id, "vmName": self.mount_name, "powerOn": True, "removeNetworkDevices": True }}}
-        result = execute_graphql_query(self.token, self.base_url, mutation, variables)
+        variables = {"input": {"id": snapshot_id, "config": { "hostId": host_id, "vmName": self.mount_name, "powerOn": True, "removeNetworkDevices": True }}}
+        result = execute_graphql_query(self.token, self.base_url, mutation, variables, self.debug)
         
         if not result.get('createHypervVirtualMachineSnapshotMount', {}).get('id'):
             raise GqlError(f"Mount initiation failed for '{self.name}'. API Response: {result}")
@@ -284,38 +311,56 @@ class HyperVRecovery(RecoveryObject):
             }
         """
         variables = {"filters": [{"field": "IS_REPLICATED", "texts": ["false"]}, {"field": "IS_RELIC", "texts": ["false"]}, {"field": "CLUSTER_ID", "texts": [cluster_id]}]}
-        all_servers = execute_graphql_query(self.token, self.base_url, query, variables).get('hypervServersPaginated', {}).get('nodes', [])
+        all_servers = execute_graphql_query(self.token, self.base_url, query, variables, self.debug).get('hypervServersPaginated', {}).get('nodes', [])
         return [s for s in all_servers if s.get('status', {}).get('connectivity') == "Connected"]
 
     def check_status(self):
         query = """
             query CheckHypervMountStatus($filters: [HypervLiveMountFilterInput!]) {
-                hypervMounts(first: 1, filters: $filters) { nodes { mountedVmStatus } }
+                hypervMounts(first: 1, filters: $filters) { nodes { id, mountedVmStatus } }
             }
         """
         variables = {"filters": [{"field": "MOUNT_NAME", "texts": [self.mount_name]}]}
-        data = execute_graphql_query(self.token, self.base_url, query, variables)
+        data = execute_graphql_query(self.token, self.base_url, query, variables, self.debug)
         nodes = data.get('hypervMounts', {}).get('nodes', [])
-        self.status = nodes[0].get('mountedVmStatus') if nodes else "MOUNTING"
+        
+        if not nodes:
+            self.status = "MOUNTING"
+            return self.status
+
+        mount = nodes[0]
+        self.status = mount.get('mountedVmStatus', 'MOUNTING')
+        if self.status == 'POWEREDON':
+            self.mount_id = mount.get('id')
+        
         return self.status
 
-    def find_mount_id(self):
-        query = "query FindHyperVMount($f: [HypervLiveMountFilterInput!]){hypervMounts(first:1,filters:$f){nodes{id}}}"
-        variables = {"f": [{"field": "MOUNT_NAME", "texts": [self.mount_name]}]}
-        nodes = execute_graphql_query(self.token, self.base_url, query, variables).get('hypervMounts',{}).get('nodes',[])
-        self.mount_id = nodes[0]['id'] if nodes and nodes[0].get('id') else None
-        return self.mount_id
-
     def unmount(self):
-        logging.info(f"Unmounting VM: '{self.mount_name}' (ID: {self.mount_id})...")
+        if not self.mount_id:
+            logging.warning(f"Could not find a completed mount ID for '{self.mount_name}' to unmount. The mount may have failed to create.")
+            return False
+        
+        logging.info(f"Unmounting Azure Local VM '{self.mount_name}' with mount ID: {self.mount_id}...")
+        print(f"🧹 [STATUS] Initiating unmount for Azure Local VM '{self.mount_name}'...")
         mutation = "mutation Unmount($input:DeleteHypervVirtualMachineSnapshotMountInput!){deleteHypervVirtualMachineSnapshotMount(input:$input){error{message}}}"
         variables = {"input": {"id": self.mount_id, "force": True}}
-        result = execute_graphql_query(self.token, self.base_url, mutation, variables).get('deleteHypervVirtualMachineSnapshotMount', {})
-        if result and result.get('error') is None:
-            logging.info(f"  Successfully initiated unmount for '{self.mount_name}'.")
-            return True
-        error_msg = result.get('error', {}).get('message', 'Unknown error.')
-        logging.error(f"  Failed to unmount '{self.mount_name}'. Reason: {error_msg}")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                result = execute_graphql_query(self.token, self.base_url, mutation, variables, self.debug).get('deleteHypervVirtualMachineSnapshotMount', {})
+                if result and result.get('error') is None:
+                    logging.info(f"  Successfully initiated unmount for '{self.mount_name}'.")
+                    return True
+                
+                error_msg = result.get('error', {}).get('message', 'Unknown error.')
+                logging.warning(f"  Attempt {attempt + 1} to unmount '{self.mount_name}' failed. Reason: {error_msg}. Retrying in 10s...")
+            except GqlError as e:
+                logging.warning(f"  Attempt {attempt + 1} to unmount '{self.mount_name}' failed with an exception: {e}. Retrying in 10s...")
+
+            if attempt < max_retries - 1:
+                time.sleep(10)
+
+        logging.error(f"  All {max_retries} unmount attempts failed for '{self.mount_name}'.")
         return False
 
 class OracleRecovery(RecoveryObject):
@@ -353,6 +398,7 @@ class OracleRecovery(RecoveryObject):
 
         if settings.get('rename_oracle_dbs'):
             self.mount_name = generate_oracle_mount_name(self.name)
+            print(f"    🏷️  [RENAME] Oracle DB '{self.name}' will be mounted as '{self.mount_name}'.")
             config['mountedDatabaseName'] = self.mount_name
             config['shouldAllowRenameToSource'] = False
         else:
@@ -369,7 +415,7 @@ class OracleRecovery(RecoveryObject):
             }
         """
         variables = {"input": {"request": {"id": db_id, "config": config}, "advancedRecoveryConfigMap": []}}
-        result = execute_graphql_query(self.token, self.base_url, mutation, variables)
+        result = execute_graphql_query(self.token, self.base_url, mutation, variables, self.debug)
 
         if not result.get('mountOracleDatabase', {}).get('id'):
             raise GqlError(f"Oracle mount initiation failed for '{self.name}'. API Response: {result}")
@@ -379,7 +425,7 @@ class OracleRecovery(RecoveryObject):
 
     def _get_latest_oracle_snapshot(self, db_id):
         query = "query GetSnap($fid: UUID!){oracleDatabase(fid:$fid){newestSnapshot{id date isExpired isQuarantined}}}"
-        data = execute_graphql_query(self.token, self.base_url, query, {"fid": db_id}).get('oracleDatabase', {})
+        data = execute_graphql_query(self.token, self.base_url, query, {"fid": db_id}, self.debug).get('oracleDatabase', {})
         snapshot = data.get('newestSnapshot')
         if not snapshot or snapshot.get('isExpired') or snapshot.get('isQuarantined'):
             raise GqlError(f"No valid newest snapshot found for DB ID {db_id}")
@@ -388,29 +434,36 @@ class OracleRecovery(RecoveryObject):
     def _get_oracle_hosts(self, cluster_id):
         query = "query GetHosts($f:[Filter!]){oracleTopLevelDescendants(filter:$f){nodes{id name objectType cluster{id name}}}}"
         variables = {"f": [{"field": "IS_RELIC", "texts": ["false"]}, {"field": "IS_REPLICATED", "texts": ["false"]}]}
-        all_desc = execute_graphql_query(self.token, self.base_url, query, variables).get('oracleTopLevelDescendants', {}).get('nodes', [])
+        all_desc = execute_graphql_query(self.token, self.base_url, query, variables, self.debug).get('oracleTopLevelDescendants', {}).get('nodes', [])
         return [h for h in all_desc if h.get('cluster', {}).get('id') == cluster_id]
 
     def check_status(self):
-        query = "query CheckMount($f:[OracleLiveMountFilterInput!]){oracleLiveMounts(first:1,filters:$f){nodes{status}}}"
+        query = "query CheckMount($f:[OracleLiveMountFilterInput!]){oracleLiveMounts(first:1,filters:$f){nodes{id, status}}}"
         variables = {"f": [{"field": "NAME", "texts": [self.mount_name]}]}
-        nodes = execute_graphql_query(self.token, self.base_url, query, variables).get('oracleLiveMounts', {}).get('nodes', [])
-        self.status = nodes[0]['status'] if nodes else "MOUNTING"
+        nodes = execute_graphql_query(self.token, self.base_url, query, variables, self.debug).get('oracleLiveMounts', {}).get('nodes', [])
+        
+        if not nodes:
+            self.status = "MOUNTING"
+            return self.status
+
+        mount = nodes[0]
+        self.status = mount.get('status', 'MOUNTING')
+        if self.status == 'AVAILABLE':
+            self.mount_id = mount.get('id')
+        
         return self.status
 
-    def find_mount_id(self):
-        query = "query FindMount($f:[OracleLiveMountFilterInput!]){oracleLiveMounts(first:1,filters:$f){nodes{id}}}"
-        variables = {"f": [{"field": "NAME", "texts": [self.mount_name]}]}
-        nodes = execute_graphql_query(self.token, self.base_url, query, variables).get('oracleLiveMounts', {}).get('nodes', [])
-        self.mount_id = nodes[0]['id'] if nodes and nodes[0].get('id') else None
-        return self.mount_id
-
     def unmount(self):
+        if not self.mount_id:
+            logging.warning(f"Could not find a completed mount ID for '{self.mount_name}' to unmount. The mount may have failed to create.")
+            return False
+        
         logging.info(f"Unmounting Oracle DB: '{self.mount_name}' (ID: {self.mount_id})...")
+        print(f"🧹 [STATUS] Initiating unmount for Oracle DB '{self.mount_name}'...")
         mutation = "mutation Unmount($input:DeleteOracleMountInput!){deleteOracleMount(input:$input){id}}"
         variables = {"input": {"id": self.mount_id, "force": True}}
         try:
-            execute_graphql_query(self.token, self.base_url, mutation, variables)
+            execute_graphql_query(self.token, self.base_url, mutation, variables, self.debug)
             logging.info(f"  Successfully initiated unmount for '{self.mount_name}'.")
             return True
         except GqlError as e:
@@ -442,7 +495,11 @@ class MSSQLRecovery(RecoveryObject):
         if not target_instance:
             raise ValueError(f"Recovery instance '{recovery_target}' is not a compatible target.")
         
-        self.mount_name = generate_mount_name(self.name) if settings.get('rename_sql_dbs') else self.name
+        self.mount_name = self.name
+        if settings.get('rename_sql_dbs'):
+            self.mount_name = generate_mount_name(self.name)
+            print(f"    🏷️  [RENAME] SQL DB '{self.name}' will be mounted as '{self.mount_name}'.")
+
         logging.info(f"  Will be mounted as '{self.mount_name}' on instance '{target_instance['name']}'.")
 
         config = {
@@ -456,7 +513,7 @@ class MSSQLRecovery(RecoveryObject):
             }
         """
         variables = {"input": {"id": db_id, "config": config}}
-        result = execute_graphql_query(self.token, self.base_url, mutation, variables)
+        result = execute_graphql_query(self.token, self.base_url, mutation, variables, self.debug)
         
         if not result.get('createMssqlLiveMount', {}).get('id'):
             raise GqlError(f"SQL mount initiation failed for '{self.name}'. API Response: {result}")
@@ -467,12 +524,12 @@ class MSSQLRecovery(RecoveryObject):
     def _find_mssql_db(self, db_name, location):
         query = "query getDb($f:[Filter!]){mssqlDatabases(filter:$f){nodes{id name}}}"
         variables = {"f": [{"field": "NAME", "texts": [db_name]}, {"field": "LOCATION", "texts": [location]}, {"field": "IS_RELIC", "texts": ["false"]}]}
-        nodes = execute_graphql_query(self.token, self.base_url, query, variables).get('mssqlDatabases', {}).get('nodes', [])
+        nodes = execute_graphql_query(self.token, self.base_url, query, variables, self.debug).get('mssqlDatabases', {}).get('nodes', [])
         return nodes[0] if nodes else None
 
     def _get_latest_snapshot_date(self, db_id):
         query = "query getSnap($fid:UUID!){mssqlDatabase(fid:$fid){cdmNewestSnapshot{date}}}"
-        snapshot = execute_graphql_query(self.token, self.base_url, query, {"fid": db_id}).get('mssqlDatabase', {}).get('cdmNewestSnapshot')
+        snapshot = execute_graphql_query(self.token, self.base_url, query, {"fid": db_id}, self.debug).get('mssqlDatabase', {}).get('cdmNewestSnapshot')
         if not snapshot or 'date' not in snapshot:
             raise GqlError(f"No valid newest snapshot found for MSSQL DB {db_id}")
         return snapshot['date']
@@ -480,7 +537,7 @@ class MSSQLRecovery(RecoveryObject):
     def _get_compatible_instances(self, db_id, recovery_time):
         query = "query getInst($input:GetCompatibleMssqlInstancesV1Input!){mssqlCompatibleInstances(input:$input){data{id name rootProperties{rootName}}}}"
         variables = {"input": {"id": db_id, "recoveryType": "V1_GET_COMPATIBLE_MSSQL_INSTANCES_V1_REQUEST_RECOVERY_TYPE_MOUNT", "recoveryTime": recovery_time}}
-        return execute_graphql_query(self.token, self.base_url, query, variables).get('mssqlCompatibleInstances', {}).get('data', [])
+        return execute_graphql_query(self.token, self.base_url, query, variables, self.debug).get('mssqlCompatibleInstances', {}).get('data', [])
         
     def _find_target_instance(self, instances, recovery_target_fqdn):
         for inst in instances:
@@ -491,25 +548,34 @@ class MSSQLRecovery(RecoveryObject):
         return None
 
     def check_status(self):
-        query = "query checkMount($f:[MssqlDatabaseLiveMountFilterInput!]){mssqlDatabaseLiveMounts(filters:$f,first:1){nodes{isReady}}}"
+        query = "query checkMount($f:[MssqlDatabaseLiveMountFilterInput!]){mssqlDatabaseLiveMounts(filters:$f,first:1){nodes{fid, isReady}}}"
         variables = {"filters": [{"field": "MOUNTED_DATABASE_NAME", "texts": [self.mount_name]}]}
-        nodes = execute_graphql_query(self.token, self.base_url, query, variables).get('mssqlDatabaseLiveMounts', {}).get('nodes', [])
-        self.status = "AVAILABLE" if nodes and nodes[0].get('isReady') else "MOUNTING"
+        nodes = execute_graphql_query(self.token, self.base_url, query, variables, self.debug).get('mssqlDatabaseLiveMounts', {}).get('nodes', [])
+        
+        if not nodes:
+            self.status = 'MOUNTING'
+            return self.status
+
+        mount = nodes[0]
+        if mount.get('isReady'):
+            self.status = 'AVAILABLE'
+            self.mount_id = mount.get('fid')
+        else:
+            self.status = 'MOUNTING'
+            
         return self.status
 
-    def find_mount_id(self):
-        query = "query findMount($f:[MssqlDatabaseLiveMountFilterInput!]){mssqlDatabaseLiveMounts(filters:$f,first:1){nodes{fid}}}"
-        variables = {"filters": [{"field": "MOUNTED_DATABASE_NAME", "texts": [self.mount_name]}]}
-        nodes = execute_graphql_query(self.token, self.base_url, query, variables).get('mssqlDatabaseLiveMounts', {}).get('nodes', [])
-        self.mount_id = nodes[0].get('fid') if nodes else None
-        return self.mount_id
-        
     def unmount(self):
+        if not self.mount_id:
+            logging.warning(f"Could not find a completed mount ID for '{self.mount_name}' to unmount. The mount may have failed to create.")
+            return False
+
         logging.info(f"Unmounting SQL DB: '{self.mount_name}' (ID: {self.mount_id})...")
+        print(f"🧹 [STATUS] Initiating unmount for SQL DB '{self.mount_name}'...")
         mutation = "mutation Unmount($input:DeleteMssqlLiveMountInput!){deleteMssqlLiveMount(input:$input){id}}"
         variables = {"input": {"id": self.mount_id, "force": True}}
         try:
-            execute_graphql_query(self.token, self.base_url, mutation, variables)
+            execute_graphql_query(self.token, self.base_url, mutation, variables, self.debug)
             logging.info(f"  Successfully initiated unmount for '{self.mount_name}'.")
             return True
         except GqlError as e:
@@ -521,32 +587,36 @@ class MSSQLRecovery(RecoveryObject):
 #
 
 RECOVERY_CLASSES = {
-    HyperVRecovery.TYPE: HyperVRecovery,
+    AzureLocalRecovery.TYPE: AzureLocalRecovery,
     OracleRecovery.TYPE: OracleRecovery,
     MSSQLRecovery.TYPE: MSSQLRecovery
 }
 
-def recovery_object_factory(token, base_url, obj_config):
+def recovery_object_factory(token, base_url, obj_config, debug_mode):
     """Creates a recovery object instance based on its type."""
     obj_type = obj_config.get('type')
     if obj_type in RECOVERY_CLASSES:
-        return RECOVERY_CLASSES[obj_type](token, base_url, obj_config)
+        return RECOVERY_CLASSES[obj_type](token, base_url, obj_config, debug_mode)
     raise ValueError(f"Unknown recovery object type: '{obj_type}'")
 
-def cache_inventories(token, base_url):
+def cache_inventories(token, base_url, debug_mode):
     """Fetches and caches protected object inventories from Rubrik."""
     logging.info("Caching protected object inventories from Rubrik...")
+    print("📦 [STATUS] Caching protected object inventories from Rubrik...")
+    inv_start_time = time.time()
     inventories = {}
 
     vm_query = "query Vms($f:Int,$a:String){hypervVirtualMachines(filter:[{field:IS_RELIC,texts:[\"false\"]},{field:IS_REPLICATED,texts:[\"false\"]}],first:$f,after:$a){nodes{id name cluster{id name}}pageInfo{hasNextPage endCursor}}}"
-    inventories[HyperVRecovery.TYPE] = get_all_paginated_nodes(token, base_url, vm_query, {}, 'hypervVirtualMachines')
-    logging.info(f"  - Found {len(inventories[HyperVRecovery.TYPE])} protected Hyper-V VMs.")
+    inventories[AzureLocalRecovery.TYPE] = get_all_paginated_nodes(token, base_url, vm_query, {}, 'hypervVirtualMachines', debug_mode)
+    logging.info(f"  - Found {len(inventories[AzureLocalRecovery.TYPE])} protected Azure Local VMs.")
 
     oracle_query = "query Orcl($f:Int,$a:String){oracleDatabases(filter:[{field:IS_RELIC,texts:\"false\"},{field:IS_REPLICATED,texts:\"false\"}],first:$f,after:$a){nodes{id name cluster{id name}}pageInfo{hasNextPage endCursor}}}"
-    inventories[OracleRecovery.TYPE] = get_all_paginated_nodes(token, base_url, oracle_query, {}, 'oracleDatabases')
+    inventories[OracleRecovery.TYPE] = get_all_paginated_nodes(token, base_url, oracle_query, {}, 'oracleDatabases', debug_mode)
     logging.info(f"  - Found {len(inventories[OracleRecovery.TYPE])} protected Oracle databases.")
 
-    logging.info("Inventories cached successfully.")
+    inv_duration = time.time() - inv_start_time
+    logging.info(f"Inventories cached successfully in {inv_duration:.2f} seconds.")
+    print(f"✅ [TIMER] Inventories cached successfully in {inv_duration:.2f} seconds.\n")
     return inventories
 
 #
@@ -576,7 +646,7 @@ def create_sample_recovery_plan(filename):
             ]
         },
         { "phase_number": 2, "description": "Application Servers",
-          "objects_to_recover": [{"name": "SAMPLE_VM_NAME", "type": "HYPERV_VM"}]
+          "objects_to_recover": [{"name": "SAMPLE_AZURE_VM_NAME", "type": "AZURE_LOCAL_VM"}]
         }
       ]
     }
@@ -590,8 +660,6 @@ def create_sample_recovery_plan(filename):
 
 def main():
     """Main function to orchestrate the recovery process."""
-    start_time = time.time()
-    
     # --- Initial Setup ---
     try:
         # Load configs and authenticate
@@ -600,12 +668,13 @@ def main():
         creds = load_json_file('config.json')
 
         plan_settings = plan.get('settings', {})
-        setup_logging(plan_settings.get('debug_mode', False))
+        debug_mode = plan_settings.get('debug_mode', False)
+        setup_logging(debug_mode)
         
-        logging.info(f"--- Starting Rubrik Recovery Plan: '{plan.get('recovery_plan_name', 'Unnamed Plan')}' ---")
+        print(f"--- Starting Rubrik Recovery Plan: '{plan.get('recovery_plan_name', 'Unnamed Plan')}' ---")
 
         token = get_auth_token(creds['RUBRIK_CLIENT_ID'], creds['RUBRIK_CLIENT_SECRET'], creds['RUBRIK_BASE_URL'])
-        inventories = cache_inventories(token, creds['RUBRIK_BASE_URL'])
+        inventories = cache_inventories(token, creds['RUBRIK_BASE_URL'], debug_mode)
     
     except (ConfigError, GqlError) as e:
         logging.critical(f"A critical error occurred during setup: {e}")
@@ -616,9 +685,15 @@ def main():
     execution_failed = False
     
     phases = sorted(plan.get('phases', []), key=lambda p: p.get('phase_number', 0))
+    
+    # Start the overall timer just before the first phase
+    script_start_time = time.time()
+
     for phase in phases:
+        phase_start_time = time.time()
         phase_num = phase.get('phase_number')
         logging.info(f"--- Starting Phase {phase_num}: {phase.get('description', 'N/A')} ---")
+        print(f"\n--- ▶️  Starting Phase {phase_num}: {phase.get('description', 'N/A')} ---")
 
         # 1. Initiation
         jobs_in_phase = []
@@ -627,11 +702,11 @@ def main():
                 logging.warning(f"Skipping sample object '{obj_conf['name']}'. Please edit 'recovery-plan.json'.")
                 continue
             try:
-                recovery_obj = recovery_object_factory(token, creds['RUBRIK_BASE_URL'], obj_conf)
+                recovery_obj = recovery_object_factory(token, creds['RUBRIK_BASE_URL'], obj_conf, debug_mode)
                 recovery_obj.initiate_mount(inventories.get(recovery_obj.TYPE, []), plan_settings)
                 jobs_in_phase.append(recovery_obj)
             except (ValueError, GqlError, KeyError) as e:
-                logging.error(f"Failed to initiate mount for '{obj_conf.get('name')}': {e}", exc_info=plan_settings.get('debug_mode'))
+                logging.error(f"Failed to initiate mount for '{obj_conf.get('name')}': {e}", exc_info=debug_mode)
                 if plan_settings.get('halt_on_error', True):
                     logging.critical("Halting execution due to error.")
                     execution_failed = True
@@ -639,75 +714,117 @@ def main():
         if execution_failed: break
 
         # 2. Monitoring
-        logging.info(f"Monitoring {len(jobs_in_phase)} jobs for Phase {phase_num}...")
-        active_jobs = list(jobs_in_phase)
-        max_wait_seconds = 1800  # 30 minutes
-        phase_start_time = time.time()
-
-        while active_jobs:
-            if time.time() - phase_start_time > max_wait_seconds:
-                logging.error(f"Phase {phase_num} timed out after {max_wait_seconds / 60} minutes.")
-                execution_failed = True
-                break
+        if jobs_in_phase:
+            logging.info(f"Monitoring {len(jobs_in_phase)} jobs for Phase {phase_num}...")
+            active_jobs = list(jobs_in_phase)
+            max_wait_seconds = 1800  # 30 minutes
             
-            time.sleep(15) # Polling interval
-            logging.info(f"--- Monitoring Update (Phase {phase_num}) ---")
-            
-            for job in active_jobs[:]:
-                try:
-                    job.check_status()
-                    logging.info(f"  - {job.name:<25} ({job.TYPE:<10}): {job.status}")
+            is_first_poll = True
+            completed_messages = []
 
-                    if (job.TYPE == HyperVRecovery.TYPE and job.status == 'POWEREDON') or \
-                       (job.TYPE in [OracleRecovery.TYPE, MSSQLRecovery.TYPE] and job.status == 'AVAILABLE'):
-                        logging.info(f"    └─ SUCCESS: Mount for '{job.name}' is available.")
-                        all_mounted_objects.append(job)
-                        active_jobs.remove(job)
+            while active_jobs:
+                if time.time() - phase_start_time > max_wait_seconds:
+                    timeout_msg = f"Phase {phase_num} timed out after {max_wait_seconds / 60} minutes."
+                    print(f"\n❌ ERROR: {timeout_msg}", file=sys.stderr)
+                    logging.error(timeout_msg)
+                    execution_failed = True
+                    break
+                
+                logging.info(f"--- Monitoring Update (Phase {phase_num}) ---")
 
-                    elif job.status in ['FAILED', 'FAILURE', 'MOUNT_FAILED']:
-                        logging.error(f"    └─ FAILED: Mount job for '{job.name}' failed.")
+                if not is_first_poll:
+                    sys.stdout.write(f"\x1b[A" * (len(active_jobs) + len(completed_messages) + 1))
+                
+                print(f"--- ⌛ Monitoring Phase {phase_num} (Updated: {time.strftime('%H:%M:%S')}) ---")
+                for msg in completed_messages:
+                    print(msg)
+                is_first_poll = False
+
+                for job in active_jobs[:]:
+                    try:
+                        job.check_status()
+                        
+                        display_name = job.name
+                        if job.name != job.mount_name and job.mount_name is not None:
+                            display_name = f"{job.name} -> {job.mount_name}"
+
+                        logging.info(f"  - {display_name:<65} ({job.TYPE:<15}): {job.status}")
+                        print(f"  - {display_name:<65} ({job.TYPE:<15}): {job.status:<15}")
+
+                        if (job.TYPE == AzureLocalRecovery.TYPE and job.status == 'POWEREDON') or \
+                           (job.TYPE in [OracleRecovery.TYPE, MSSQLRecovery.TYPE] and job.status == 'AVAILABLE'):
+                            
+                            success_message = f"  - {display_name:<65} ({job.TYPE:<15}): ✅ SUCCESS          "
+                            completed_messages.append(success_message)
+                            logging.info(f"SUCCESS: Mount for '{job.name}' is available.")
+                            all_mounted_objects.append(job)
+                            active_jobs.remove(job)
+
+                        elif job.status in ['FAILED', 'FAILURE', 'MOUNT_FAILED']:
+                            failure_message = f"  - {display_name:<65} ({job.TYPE:<15}): ❌ FAILED ({job.status})"
+                            completed_messages.append(failure_message)
+                            logging.error(f"Mount job for '{job.name}' failed with status '{job.status}'.")
+                            active_jobs.remove(job)
+                            if plan_settings.get('halt_on_error', True):
+                                execution_failed = True
+
+                    except GqlError as e:
+                        display_name = job.name
+                        if job.name != job.mount_name and job.mount_name is not None:
+                            display_name = f"{job.name} -> {job.mount_name}"
+                        
+                        failure_message = f"  - {display_name:<65} ({job.TYPE:<15}): ❌ ERROR (Check logs)"
+                        completed_messages.append(failure_message)
+                        logging.error(f"Error monitoring '{job.name}': {e}", exc_info=debug_mode)
                         active_jobs.remove(job)
                         if plan_settings.get('halt_on_error', True):
-                            logging.critical("Halting execution due to job failure.")
                             execution_failed = True
-
-                except GqlError as e:
-                    logging.error(f"Error monitoring '{job.name}': {e}", exc_info=plan_settings.get('debug_mode'))
-                    active_jobs.remove(job)
-                    if plan_settings.get('halt_on_error', True):
-                        logging.critical("Halting execution due to monitoring error.")
-                        execution_failed = True
+                
+                if execution_failed: break
+                if not active_jobs: break
+                time.sleep(15)
+            
             if execution_failed: break
-        if execution_failed: break
 
-        logging.info(f"--- Phase {phase_num} Completed ---")
+        phase_duration = time.time() - phase_start_time
+        phase_duration_str = f"{int(phase_duration // 60)}m {phase_duration % 60:.2f}s"
+        logging.info(f"--- Phase {phase_num} Completed in {phase_duration_str} ---")
+        print(f"\n--- ✅ Phase {phase_num} Completed ---")
+        for msg in completed_messages:
+            logging.info(msg.strip())
+            print(msg)
+        print(f"📊 [TIMER] Phase {phase_num} duration: {phase_duration_str}")
 
     # --- Final Summary ---
     if execution_failed:
         logging.critical("\nRecovery plan execution FAILED.")
+        print("\n❌ [FAILURE] Recovery plan execution FAILED. Check logs for details.")
     else:
         logging.info("\n🎉🎉🎉 All recovery phases completed successfully! 🎉🎉🎉")
+        print("\n🎉🎉🎉 [SUCCESS] All recovery phases completed successfully! 🎉🎉🎉")
 
-    end_time = time.time()
-    duration = end_time - start_time
-    logging.info(f"Total script runtime: {int(duration // 60)} minutes and {duration % 60:.2f} seconds.")
+    script_duration = time.time() - script_start_time
+    duration_str = f"{int(script_duration // 60)}m {script_duration % 60:.2f}s"
+    logging.info(f"Total recovery runtime: {duration_str}.")
+    print(f"\n📊 [TIMER] Total recovery runtime: {duration_str}.")
 
     # --- Cleanup ---
     if plan_settings.get('cleanup_after_run', True):
         logging.info("\n--- Starting Cleanup Phase: Unmounting all live mounts ---")
+        print("\n--- 🧹 Starting Cleanup Phase ---")
         if not all_mounted_objects:
             logging.info("No successful mounts to clean up.")
+            print("🧹 [STATUS] No successful mounts to clean up.")
         for mount in all_mounted_objects:
             try:
-                if mount.find_mount_id():
-                    mount.unmount()
-                else:
-                    logging.warning(f"Could not find mount ID for '{mount.mount_name}'. Manual cleanup may be required.")
+                mount.unmount()
             except (GqlError, Exception) as e:
                 logging.error(f"Failed during cleanup for '{mount.mount_name}': {e}")
         logging.info("--- Cleanup Phase Complete ---")
+        print("--- ✅ Cleanup Phase Complete ---")
     else:
         logging.info("\nSkipping cleanup as per 'cleanup_after_run' setting.")
+        print("\n--- ⏭️  Skipping Cleanup Phase ---")
         for mount in all_mounted_objects:
              logging.info(f"  - Mount active: '{mount.mount_name}' ({mount.TYPE})")
 
